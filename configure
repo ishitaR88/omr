@@ -3770,9 +3770,9 @@ if [ "$OMR_ENV_OPENXL" == "1" ]; then
   do
     CC="$ac_save_CC $ac_arg"
     if ac_fn_c_try_compile "$LINENO"; then :
-    ac_cv_prog_cc_c89=$ac_arg
-  fi
-  rm -f core conftest.err conftest.$ac_objext
+      ac_cv_prog_cc_c89=$ac_arg
+    fi
+    rm -f core conftest.err conftest.$ac_objext
     test "x$ac_cv_prog_cc_c89" != "xno" && break
   done
 else
@@ -3782,8 +3782,8 @@ else
     CC="$ac_save_CC $ac_arg"
     if ac_fn_c_try_compile "$LINENO"; then :
     ac_cv_prog_cc_c89=$ac_arg
-  fi
-  rm -f core conftest.err conftest.$ac_objext
+    fi
+    rm -f core conftest.err conftest.$ac_objext
     test "x$ac_cv_prog_cc_c89" != "xno" && break
   done
 fi
