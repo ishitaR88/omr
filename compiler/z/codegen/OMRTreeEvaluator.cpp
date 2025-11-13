@@ -11777,8 +11777,103 @@ TR::Register *getLitPoolBaseReg(TR::Node *node, TR::CodeGenerator *cg)
     return litPoolBaseReg;
 }
 
+// Evaluator for a custom IL op: arrayset_vstl_i32(dst, nBytes, val32)
+TR::Register *arraysetExpEvaluator(TR::Node *node, TR::CodeGenerator *cg)
+{
+    // Children: 0=dst(base ptr), 1=nBytes(u64), 2=val(i32)
+    TR::Node *dstNode  = node->getChild(0);
+    TR::Node *lenNode  = node->getChild(1);
+    TR::Node *valNode  = node->getChild(2);
+
+    TR::Register *base = cg->evaluate(dstNode);
+    TR::Register *len  = cg->evaluate(lenNode);
+    TR::Register *val  = cg->evaluate(valNode);
+
+    // Temporaries
+    TR::Register *cnt16 = cg->allocateRegister();   // R4: nBytes >> 4
+    TR::Register *tail  = cg->allocateRegister();   // R5: nBytes & 0xF (also used for (rem-1))
+    TR::Register *v0    = cg->allocateRegister(TR_VRF);
+
+    // Labels
+    TR::LabelSymbol *L_tail = generateLabelSymbol(cg);
+    TR::LabelSymbol *L_loop = generateLabelSymbol(cg);
+    TR::LabelSymbol *L_done = generateLabelSymbol(cg);
+
+    // ----------------------------------------------------------------
+    // VL  V0, R3, 0    ; V0.word[0] = (int32)R3
+    // VREPF  V0, V0, 0    ; replicate word[0] → all lanes
+    // ----------------------------------------------------------------
+    // (Use the vector load-from-GPR + replicate helpers)
+    generateRRInstruction(cg, TR::InstOpCode::VL, v0, val);
+    // args:= TR::CodeGenerator *cg, TR::InstOpCode::Mnemonic op, TR::Node *n,
+    //TR::Register *reg, TR::MemoryReference *memRef, uint8_t mask3, TR::Instruction *preced
+    //generateVRXInstruction(cg, TR::InstOpCode::VL,...);
+    generateRRInstruction(cg, TR::InstOpCode::VREPF, v0, v0);            // replicate lane 0
+
+    // ----------------------------------------------------------------
+    // SRLG R4, R2, 4   ; cnt16 = totalBytes >> 4
+    // LTGR R4, R4
+    // BZ   .tail
+    // ----------------------------------------------------------------
+    generateRRFInstruction (cg, TR::InstOpCode::SRLG,  cnt16, len, 4);     // shift right logical by imm=4
+    generateRREInstruction (cg, TR::InstOpCode::LTGR,  cnt16, cnt16);      // set CC from R4
+    generateS390BranchInstruction (cg, TR::InstOpCode::BRC, TR::CCMASK_Z, L_tail);
+
+    // ----------------------------------------------------------------
+    // .vloop16:
+    // VST  V0, 0(R1)
+    // LA   R1, 16(R1)
+    // BRCTG R4, .vloop16
+    // ----------------------------------------------------------------
+    generateS390LabelInstruction (cg, TR::InstOpCode::LABEL, L_loop);
+    generateRXYInstruction (cg, TR::InstOpCode::VST,  v0, base, 0);        // VST V0, 0(R1)
+    generateRXInstruction (cg, TR::InstOpCode::LA,   base, base, 16);     // LA  R1, 16(R1)
+    generateS390BranchOnCountInstruction (cg, TR::InstOpCode::BRCTG, cnt16, L_loop);
+
+    // ----------------------------------------------------------------
+    // .tail:
+    // RISBGN R5, R2, 60, 63, 0  ; tail = nBytes & 0xF
+    // LTGR   R5, R5
+    // BZ     .done
+    // AGHI   R5, -1             ; VSTL length is (rem-1)
+    // VSTL   V0, 0(R1), R5
+    // ----------------------------------------------------------------
+    generateS390LabelInstruction(cg, TR::InstOpCode::LABEL, L_tail);
+    generateRISBGNInstruction(cg, tail, len, 60, 63, 0);                    // tail = (len & 0xF)
+    generateRREInstruction(cg, TR::InstOpCode::LTGR, tail, tail);
+    generateS390BranchInstruction(cg, TR::InstOpCode::BRC, TR::CCMASK_Z, L_done);
+    generateRIInstruction(cg, TR::InstOpCode::AGHI, tail, -1);          // tail = tail - 1
+    generateRXYRInstruction(cg, TR::InstOpCode::VSTL, v0, base, 0, tail); // VSTL V0, 0(R1), R5
+
+    generateS390LabelInstruction (cg, TR::InstOpCode::LABEL, L_done);
+
+    // Register dependencies (keeps base/len/val live through the sequence)
+    TR::RegisterDependencyConditions *deps =
+        new (cg->trHeapMemory()) TR::RegisterDependencyConditions(0, 0, cg);
+
+    addDependency(deps, base, TR::RealRegister::GPR1, TR_GPR, cg);
+    addDependency(deps, len,  TR::RealRegister::GPR2, TR_GPR, cg);
+    addDependency(deps, val,  TR::RealRegister::GPR3, TR_GPR, cg);
+    addDependency(deps, cnt16,TR::RealRegister::GPR4, TR_GPR, cg);
+    addDependency(deps, tail, TR::RealRegister::GPR5, TR_GPR, cg);
+    addDependency(deps, v0,   TR::RealRegister::VRF0, TR_VRF, cg);
+
+    // Attach deps to the final label (or to the first instr after evaluation)
+    node->setRegister(NULL);
+    cg->stopUsingRegister(cnt16);
+    cg->stopUsingRegister(tail);
+    cg->stopUsingRegister(v0);
+    cg->decReferenceCount(dstNode);
+    cg->decReferenceCount(lenNode);
+    cg->decReferenceCount(valNode);
+    return NULL;
+}
+
 TR::Register *OMR::Z::TreeEvaluator::arraysetEvaluator(TR::Node *node, TR::CodeGenerator *cg)
 {
+    static bool useExperimentalSequence = feGetEnv("TR_ARRAYSETEXP") != NULL;
+    if (useExperimentalSequence)
+        return arraysetExpEvaluator(node, cg);
     TR::Node *baseAddr = node->getChild(0);
     TR::Node *constExpr = node->getChild(1);
     TR::Node *elemsExpr = node->getChild(2);
